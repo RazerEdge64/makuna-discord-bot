@@ -1,0 +1,17 @@
+services:
+  - type: worker
+    name: spectre-onbot
+    env: python
+    plan: free           # or starter
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: python onbot.py
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false      # we’ll set the value in the dashboard
+      - key: STATE_FILE
+        value: /data/onbot_state.json
+    disk:
+      name: state
+      mountPath: /data
+      sizeGB: 1
