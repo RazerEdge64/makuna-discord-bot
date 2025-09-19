@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: web
     name: makuna-discord-onbot
     env: python
     plan: free
@@ -10,4 +10,4 @@ services:
       - key: DISCORD_TOKEN
         sync: false
       - key: STATE_FILE
-        value: /tmp/onbot_state.json   # ephemeral
+        value: /tmp/onbot_state.json
