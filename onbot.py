@@ -357,5 +357,11 @@ async def clear_on(interaction: discord.Interaction):
     save_state(state)
     await interaction.response.send_message("✅ Cleared current ON sitter.", ephemeral=True)
 
+@client.tree.command(name="sync", description="Admin: sync slash commands to this server")
+@app_commands.default_permissions(manage_guild=True)
+async def sync_cmd(interaction: discord.Interaction):
+    await client.tree.sync(guild=interaction.guild)
+    await interaction.response.send_message("✅ Commands synced to this server.", ephemeral=True)
+
 # ---------- run ----------
 client.run(TOKEN)
