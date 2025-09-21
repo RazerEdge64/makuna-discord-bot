@@ -35,18 +35,36 @@ STATE_FILE = os.environ.get("STATE_FILE", "onbot_state.json")
 SERVER_TZ = datetime.timezone(datetime.timedelta(hours=-1), name="UTC−1")
 
 # ---- tiny HTTP server so Render Web Service stays healthy
+# keep strong refs so GC doesn't close the socket
+_http_runner: web.AppRunner | None = None
+_http_site: web.TCPSite | None = None
+
 async def health(_request):
     return web.Response(text="ok")
 
 async def start_http_server():
+    global _http_runner, _http_site
     app = web.Application()
     app.router.add_get("/", health)
     app.router.add_get("/healthz", health)
+
     port = int(os.environ.get("PORT", "10000"))  # Render injects PORT
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
+    _http_runner = web.AppRunner(app)
+    await _http_runner.setup()
+    _http_site = web.TCPSite(_http_runner, "0.0.0.0", port)
+    await _http_site.start()
+    print(f"[http] listening on 0.0.0.0:{port}", flush=True)
+
+async def stop_http_server():
+    global _http_runner, _http_site
+    try:
+        if _http_site:
+            await _http_site.stop()
+        if _http_runner:
+            await _http_runner.cleanup()
+    finally:
+        _http_site = None
+        _http_runner = None
 
 # ---------- helpers ----------
 def load_state() -> dict:
