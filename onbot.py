@@ -95,6 +95,7 @@ class OnClient(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
+        await self.load_extension("ask")
         await self.tree.sync()
 
 client = OnClient()
