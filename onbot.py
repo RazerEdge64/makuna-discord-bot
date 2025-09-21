@@ -17,6 +17,7 @@ import asyncio
 import random
 import discord
 from discord import app_commands
+from discord.ext import commands   # <-- use commands.Bot
 
 # ---- optional .env
 try:
@@ -35,7 +36,6 @@ STATE_FILE = os.environ.get("STATE_FILE", "onbot_state.json")
 SERVER_TZ = datetime.timezone(datetime.timedelta(hours=-1), name="UTC−1")
 
 # ---- tiny HTTP server so Render Web Service stays healthy
-# keep strong refs so GC doesn't close the socket
 _http_runner: web.AppRunner | None = None
 _http_site: web.TCPSite | None = None
 
@@ -47,24 +47,12 @@ async def start_http_server():
     app = web.Application()
     app.router.add_get("/", health)
     app.router.add_get("/healthz", health)
-
-    port = int(os.environ.get("PORT", "10000"))  # Render injects PORT
+    port = int(os.environ.get("PORT", "10000"))  # Render sets PORT
     _http_runner = web.AppRunner(app)
     await _http_runner.setup()
     _http_site = web.TCPSite(_http_runner, "0.0.0.0", port)
     await _http_site.start()
     print(f"[http] listening on 0.0.0.0:{port}", flush=True)
-
-async def stop_http_server():
-    global _http_runner, _http_site
-    try:
-        if _http_site:
-            await _http_site.stop()
-        if _http_runner:
-            await _http_runner.cleanup()
-    finally:
-        _http_site = None
-        _http_runner = None
 
 # ---------- helpers ----------
 def load_state() -> dict:
@@ -96,7 +84,6 @@ def human_dur(seconds: int) -> str:
     return f"{s}s"
 
 # persistent memory by guild:
-# {"guild_id": {...}}
 state = load_state()
 
 # runtime tasks (not persisted)
@@ -113,22 +100,22 @@ ACTIVITY_CHOICES = [
     app_commands.Choice(name="other",     value="other"),
 ]
 
-class OnClient(discord.Client):
+class OnBot(commands.Bot):  # <-- commands.Bot
     def __init__(self):
         intents = discord.Intents.default()
         super().__init__(
+            command_prefix=commands.when_mentioned_or("!"),  # not used, just required
             intents=intents,
             allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=False)
         )
-        self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        # load LLM slash command module (ask.py must sit next to this file)
+        # load the LLM slash command from ask.py (must be beside this file)
         await self.load_extension("ask")
-        # global sync (plus a guild /sync command below for instant sync)
+        # global sync (use /sync for instant per-guild sync)
         await self.tree.sync()
 
-client = OnClient()
+client = OnBot()
 
 # ---------- compose + send helpers ----------
 def compose_update_text(cfg: dict, now: int | None = None) -> str:
@@ -137,13 +124,11 @@ def compose_update_text(cfg: dict, now: int | None = None) -> str:
     end = int(since + cfg["for_min"] * 60) if cfg.get("for_min") else None
     show_date = to_server_dt(since).date() != to_server_dt(end if end else now).date()
     fmter = fmt_date_hhmm if show_date else fmt_hhmm
-
     user_mention = f"<@{cfg['user_id']}>"
     note = f" — {cfg['note']}" if cfg.get("note") else ""
     line2 = f"Server time: **{fmter(since)}** → **{fmter(end) if end else fmter(now)}** UTC−1"
     if end and end < now:
         line2 += " (planned end passed)"
-
     elapsed = human_dur(now - since)
     return f"{user_mention} **ON** — **{cfg['activity']}**{note}\n{line2} — **{elapsed}** elapsed."
 
@@ -161,19 +146,16 @@ async def update_loop(guild_id: str):
             cfg = state.get(guild_id)
             if not cfg or not cfg.get("updates_enabled") or not cfg.get("user_id"):
                 break
-
             chan_id = cfg.get("channel_id")
             channel = client.get_channel(chan_id) if chan_id else None
             if not channel:
                 cfg["updates_enabled"] = False
                 save_state(state)
                 break
-
             try:
                 await send_update_once(channel, cfg)
             except Exception:
                 pass
-
             interval = max(5, int(cfg.get("interval_min", 60))) * 60
             await asyncio.sleep(interval)
     finally:
@@ -232,19 +214,14 @@ async def on(interaction: discord.Interaction,
     save_state(state)
 
     extras = []
-    if note:
-        extras.append(note)
-    if until:
-        extras.append(f"for {for_min}m (→ {fmt_hhmm(until)} UTC−1)")
+    if note: extras.append(note)
+    if until: extras.append(f"for {for_min}m (→ {fmt_hhmm(until)} UTC−1)")
     suffix = " — " + " | ".join(extras) if extras else ""
-
     msg = (
         f"🟢 {interaction.user.mention} is **ON** acc — **{activity.value}**{suffix}\n"
         f"Server time: **{fmt_hhmm(now)}** UTC−1 start"
     )
-    await interaction.response.send_message(
-        msg, allowed_mentions=discord.AllowedMentions(users=True)
-    )
+    await interaction.response.send_message(msg, allowed_mentions=discord.AllowedMentions(users=True))
 
     if state[guild_id]["updates_enabled"]:
         start_update_task(guild_id)
@@ -287,7 +264,6 @@ async def status(interaction: discord.Interaction):
 async def off(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     current = state.get(guild_id)
-
     if not current or current.get("user_id") != interaction.user.id:
         return await interaction.response.send_message("ℹ️ You are not currently ON.", ephemeral=True)
 
@@ -318,16 +294,12 @@ async def off(interaction: discord.Interaction):
                             app_commands.Choice(name="off", value="off")])
 @app_commands.choices(ping=[app_commands.Choice(name="here", value="here"),
                             app_commands.Choice(name="off", value="off")])
-async def updates(
-    interaction: discord.Interaction,
-    mode: app_commands.Choice[str],
-    interval: int | None = None,
-    ping: app_commands.Choice[str] | None = None
-):
+async def updates(interaction: discord.Interaction,
+                  mode: app_commands.Choice[str],
+                  interval: int | None = None,
+                  ping: app_commands.Choice[str] | None = None):
     guild_id = str(interaction.guild_id)
     cfg = state.get(guild_id) or {}
-
-    # Always save settings, even if nobody is ON (arm updates).
     if interval is not None and interval > 0:
         cfg["interval_min"] = int(interval)
     if ping is not None:
@@ -337,7 +309,6 @@ async def updates(
     state[guild_id] = cfg
     save_state(state)
 
-    # If there is an active sitter and updates are ON, fire an instant tick and start loop.
     if cfg.get("user_id") and cfg["updates_enabled"]:
         channel = client.get_channel(cfg["channel_id"])
         if channel:
@@ -357,11 +328,9 @@ async def updates(
         armed = "armed" if cfg["updates_enabled"] else "off"
         return await interaction.response.send_message(
             f"✅ Auto-updates **{armed}** (every **{cfg.get('interval_min',60)}m**, ping "
-            f"{'HERE' if cfg.get('ping_here') else 'OFF'}) → <#{cfg['channel_id']}>\n"
-            + random.choice(msgs)
+            f"{'HERE' if cfg.get('ping_here') else 'OFF'}) → <#{cfg['channel_id']}>\n" + random.choice(msgs)
         )
 
-    # Active sitter path message
     ping_txt = "HERE" if cfg.get("ping_here") else "OFF"
     if cfg["updates_enabled"]:
         return await interaction.response.send_message(
@@ -388,8 +357,8 @@ async def sync_cmd(interaction: discord.Interaction):
 
 # ---------- run (start HTTP + Discord) ----------
 async def main():
-    await start_http_server()
-    await client.start(TOKEN)
+    await start_http_server()     # bind to $PORT for Render
+    await client.start(TOKEN)     # don't use client.run()
 
 if __name__ == "__main__":
     try:
