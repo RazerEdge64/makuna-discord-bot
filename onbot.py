@@ -8,6 +8,8 @@
 #   /clear_on (admin)
 
 import os
+from aiohttp import web
+
 import json
 import time
 import datetime
@@ -31,6 +33,20 @@ STATE_FILE = os.environ.get("STATE_FILE", "onbot_state.json")
 
 # Travian server timezone: UTC−1
 SERVER_TZ = datetime.timezone(datetime.timedelta(hours=-1), name="UTC−1")
+
+# ---- tiny HTTP server so Render Web Service stays healthy
+async def health(_request):
+    return web.Response(text="ok")
+
+async def start_http_server():
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/healthz", health)
+    port = int(os.environ.get("PORT", "10000"))  # Render injects PORT
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
 
 # ---------- helpers ----------
 def load_state() -> dict:
@@ -62,12 +78,7 @@ def human_dur(seconds: int) -> str:
     return f"{s}s"
 
 # persistent memory by guild:
-# {"guild_id": {
-#    "user_id": int, "activity": str, "note": str,
-#    "since": int, "for_min": int|None,
-#    "updates_enabled": bool, "interval_min": int, "channel_id": int,
-#    "ping_here": bool
-# }}
+# {"guild_id": {...}}
 state = load_state()
 
 # runtime tasks (not persisted)
@@ -87,7 +98,6 @@ ACTIVITY_CHOICES = [
 class OnClient(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
-        # allow @here when permitted in server/channel
         super().__init__(
             intents=intents,
             allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=False)
@@ -95,14 +105,15 @@ class OnClient(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
+        # load LLM slash command module (ask.py must sit next to this file)
         await self.load_extension("ask")
+        # global sync (plus a guild /sync command below for instant sync)
         await self.tree.sync()
 
 client = OnClient()
 
 # ---------- compose + send helpers ----------
 def compose_update_text(cfg: dict, now: int | None = None) -> str:
-    """Return the multi-line status text for updates."""
     now = now or int(time.time())
     since = int(cfg["since"])
     end = int(since + cfg["for_min"] * 60) if cfg.get("for_min") else None
@@ -127,7 +138,6 @@ async def send_update_once(channel: discord.abc.Messageable, cfg: dict):
 
 # ---------- update loop ----------
 async def update_loop(guild_id: str):
-    """Posts periodic status lines while updates are enabled and someone is ON."""
     try:
         while True:
             cfg = state.get(guild_id)
@@ -168,18 +178,14 @@ def stop_update_task(guild_id: str):
 
 # ---------- commands ----------
 @client.tree.command(description="Mark yourself ON the account and log it here")
-@app_commands.describe(
-    activity="What are you doing?",
-    note="Optional short note",
-    for_min="Planned duration in minutes (optional)"
-)
+@app_commands.describe(activity="What are you doing?",
+                       note="Optional short note",
+                       for_min="Planned duration in minutes (optional)")
 @app_commands.choices(activity=ACTIVITY_CHOICES)
-async def on(
-    interaction: discord.Interaction,
-    activity: app_commands.Choice[str],
-    note: str | None = None,
-    for_min: int | None = None
-):
+async def on(interaction: discord.Interaction,
+             activity: app_commands.Choice[str],
+             note: str | None = None,
+             for_min: int | None = None):
     guild_id = str(interaction.guild_id)
     current = state.get(guild_id)
 
@@ -222,7 +228,6 @@ async def on(
         msg, allowed_mentions=discord.AllowedMentions(users=True)
     )
 
-    # if updates were armed before, start the loop now
     if state[guild_id]["updates_enabled"]:
         start_update_task(guild_id)
 
@@ -363,5 +368,13 @@ async def sync_cmd(interaction: discord.Interaction):
     await client.tree.sync(guild=interaction.guild)
     await interaction.response.send_message("✅ Commands synced to this server.", ephemeral=True)
 
-# ---------- run ----------
-client.run(TOKEN)
+# ---------- run (start HTTP + Discord) ----------
+async def main():
+    await start_http_server()
+    await client.start(TOKEN)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
