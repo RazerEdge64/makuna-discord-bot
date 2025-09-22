@@ -9,7 +9,7 @@
 
 import os
 from aiohttp import web
-
+import sys
 import json
 import time
 import datetime
@@ -110,10 +110,21 @@ class OnBot(commands.Bot):  # <-- commands.Bot
         )
 
     async def setup_hook(self):
-        # load the LLM slash command from ask.py (must be beside this file)
-        await self.load_extension("ask")
-        # global sync (use /sync for instant per-guild sync)
+        ext_path = os.environ.get("ASK_EXT", "ask")  # set ASK_EXT if ask.py is in a subfolder
+        try:
+            await self.load_extension(ext_path)
+            print(f"[ask] extension loaded: {ext_path}", flush=True)
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            print(f"[ask] extension FAILED: {ext_path} -> {e}", flush=True)
+
+        # Global sync (slow), but we'll also guild-sync below.
         await self.tree.sync()
+        print("[sync] global sync requested", flush=True)
+
+        # Debug context
+        print(f"[env] CWD={os.getcwd()}", flush=True)
+        print(f"[env] sys.path[0]={sys.path[0]}", flush=True)
 
 client = OnBot()
 
@@ -354,6 +365,17 @@ async def clear_on(interaction: discord.Interaction):
 async def sync_cmd(interaction: discord.Interaction):
     await client.tree.sync(guild=interaction.guild)
     await interaction.response.send_message("✅ Commands synced to this server.", ephemeral=True)
+
+@client.event
+async def on_ready():
+    # Force a per-guild sync so commands appear instantly in each server
+    for g in client.guilds:
+        try:
+            await client.tree.sync(guild=g)
+            print(f"[sync] guild sync OK: {g.name} ({g.id})", flush=True)
+        except Exception as e:
+            print(f"[sync] guild sync FAILED for {g.id}: {e}", flush=True)
+
 
 # ---------- run (start HTTP + Discord) ----------
 async def main():
